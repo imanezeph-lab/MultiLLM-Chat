@@ -38,7 +38,9 @@ if ! command -v create-dmg &>/dev/null; then
     brew install create-dmg
 fi
 
-create-dmg --overwrite \
+rm -f "installer/MultiLLM-Chat.dmg"
+create-dmg \
+    --volname "MultiLLM Chat" \
     --icon-size 128 \
     --app-drop-link 380 220 \
     "installer/MultiLLM-Chat.dmg" \

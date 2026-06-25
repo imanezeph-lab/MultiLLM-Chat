@@ -65,7 +65,9 @@ jobs:
       - name: Create .dmg
         run: |
           brew install create-dmg
-          create-dmg --overwrite \
+          rm -f MultiLLM-Chat.dmg
+          create-dmg \
+            --volname "MultiLLM Chat" \
             --icon-size 128 \
             --app-drop-link 380 220 \
             MultiLLM-Chat.dmg \
