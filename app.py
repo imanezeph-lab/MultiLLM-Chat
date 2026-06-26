@@ -8,9 +8,13 @@ from PyQt6.QtWidgets import (
     QFrame, QTextBrowser, QTextEdit, QPushButton,
     QListWidget, QListWidgetItem, QComboBox, QLabel,
     QScrollBar, QApplication, QGraphicsOpacityEffect,
+    QMenu, QInputDialog, QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QEvent
-from PyQt6.QtGui import QPixmap, QShortcut, QKeySequence, QTextCursor
+from PyQt6.QtGui import (
+    QPixmap, QShortcut, QKeySequence, QTextCursor,
+    QAction, QColor,
+)
 
 from config_manager import ConfigManager, MODEL_OPTIONS, get_screenshots_dir
 from api_clients import encode_image_to_data_url, make_image_message
@@ -229,6 +233,8 @@ class ChatInput(QWidget):
 
         self._attached_image_path = None
 
+        self.text_edit.installEventFilter(self)
+
     def _on_text_changed(self):
         text = self.text_edit.toPlainText().strip()
         has_content = bool(text) or self._attached_image_path is not None
@@ -284,16 +290,16 @@ class ChatInput(QWidget):
     def get_attached_image_path(self):
         return self._attached_image_path
 
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key.Key_Return and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            if self.send_btn.isEnabled():
-                self.send_requested.emit()
-            event.accept()
-        elif event.key() == Qt.Key.Key_Return and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            self.text_edit.insertPlainText("\n")
-            event.accept()
-        else:
-            super().keyPressEvent(event)
+    def eventFilter(self, obj, event):
+        if obj == self.text_edit and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                if self.send_btn.isEnabled():
+                    self.send_requested.emit()
+                return True
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.text_edit.insertPlainText("\n")
+                return True
+        return super().eventFilter(obj, event)
 
 
 class Sidebar(QFrame):
@@ -335,6 +341,8 @@ class Sidebar(QFrame):
         self.chat_list.setFrameShape(QFrame.Shape.NoFrame)
         self.chat_list.setSpacing(2)
         self.chat_list.currentItemChanged.connect(self._on_chat_selected)
+        self.chat_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.chat_list.customContextMenuRequested.connect(self._show_chat_context_menu)
         layout.addWidget(self.chat_list, 1)
 
         # Bottom buttons
@@ -378,6 +386,99 @@ class Sidebar(QFrame):
             if cid:
                 self.chat_selected.emit(cid)
 
+    def _show_chat_context_menu(self, pos):
+        item = self.chat_list.itemAt(pos)
+        if not item:
+            return
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        if not cid:
+            return
+
+        chat = self.cfg.get_chat(cid)
+        if not chat:
+            return
+
+        is_archived = chat.get("archived", False)
+        menu = QMenu(self)
+
+        rename_action = QAction("Rename", self)
+        rename_action.triggered.connect(lambda: self._rename_chat(cid))
+        menu.addAction(rename_action)
+
+        if is_archived:
+            archive_action = QAction("Unarchive", self)
+            archive_action.triggered.connect(lambda: self._unarchive_chat(cid))
+        else:
+            archive_action = QAction("Archive", self)
+            archive_action.triggered.connect(lambda: self._archive_chat(cid))
+        menu.addAction(archive_action)
+
+        menu.addSeparator()
+
+        share_action = QAction("Share", self)
+        share_action.triggered.connect(lambda: self._share_chat(cid))
+        menu.addAction(share_action)
+
+        delete_action = QAction("Delete", self)
+        delete_action.triggered.connect(lambda: self._delete_chat(cid))
+        menu.addAction(delete_action)
+
+        menu.exec(self.mapToGlobal(pos))
+
+    def _rename_chat(self, chat_id):
+        chat = self.cfg.get_chat(chat_id)
+        if not chat:
+            return
+        new_title, ok = QInputDialog.getText(
+            self, "Rename Chat", "New name:", text=chat["title"]
+        )
+        if ok and new_title.strip():
+            self.cfg.update_chat_title(chat_id, new_title.strip())
+            self.refresh()
+
+    def _archive_chat(self, chat_id):
+        was_active = self.cfg.config.get("active_chat_id") == chat_id
+        self.cfg.archive_chat(chat_id)
+        if was_active:
+            active = self.cfg.get_active_chat()
+            if active:
+                self.chat_selected.emit(active["id"])
+        self.refresh()
+
+    def _unarchive_chat(self, chat_id):
+        self.cfg.unarchive_chat(chat_id)
+        self.refresh()
+
+    def _share_chat(self, chat_id):
+        text = self.cfg.export_chat_text(chat_id)
+        if not text:
+            return
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "Export Chat", f"chat_{chat_id[:8]}.txt",
+            "Text Files (*.txt);;All Files (*)"
+        )
+        if filepath:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(text)
+
+    def _delete_chat(self, chat_id):
+        chat = self.cfg.get_chat(chat_id)
+        if not chat:
+            return
+        confirm = QMessageBox.question(
+            self, "Delete Chat",
+            f'Are you sure you want to delete "{chat["title"]}"?',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if confirm == QMessageBox.StandardButton.Yes:
+            was_active = self.cfg.config.get("active_chat_id") == chat_id
+            self.cfg.delete_chat(chat_id)
+            if was_active:
+                active = self.cfg.get_active_chat()
+                if active:
+                    self.chat_selected.emit(active["id"])
+            self.refresh()
+
     def _open_settings(self):
         dlg = SettingsDialog(self.window(), self.cfg)
         dlg.exec()
@@ -414,12 +515,36 @@ class Sidebar(QFrame):
         self.chat_list.blockSignals(True)
         self.chat_list.clear()
         active_id = self.cfg.config.get("active_chat_id")
+
+        # Active chats
         for cid, title in self.cfg.get_chat_list():
             item = QListWidgetItem(title)
             item.setData(Qt.ItemDataRole.UserRole, cid)
             if cid == active_id:
                 item.setSelected(True)
             self.chat_list.addItem(item)
+
+        # Archived section
+        archived = [(cid, t) for cid, t in self.cfg.get_chat_list(include_archived=True)
+                     if self.cfg.get_chat(cid).get("archived")]
+        if archived:
+            header = QListWidgetItem("  Archived")
+            header.setFlags(Qt.ItemFlag.NoItemFlags)
+            header.setForeground(QColor("#8E8EA0"))
+            f = header.font()
+            f.setBold(True)
+            f.setPointSize(f.pointSize() - 1)
+            header.setFont(f)
+            self.chat_list.addItem(header)
+            for cid, title in archived:
+                item = QListWidgetItem(title)
+                item.setData(Qt.ItemDataRole.UserRole, cid)
+                f = item.font()
+                f.setItalic(True)
+                item.setFont(f)
+                item.setForeground(QColor("#8E8EA0"))
+                self.chat_list.addItem(item)
+
         self.chat_list.blockSignals(False)
 
 
@@ -522,6 +647,10 @@ class ChatWindow(QMainWindow):
         # Focus mode shortcut
         QShortcut(QKeySequence("Ctrl+Shift+F"), self).activated.connect(self.toggle_focus_mode)
         QShortcut(QKeySequence("Escape"), self).activated.connect(self._on_escape)
+
+        # Transparency shortcuts (Cmd+Up/Down on macOS, Ctrl+Up/Down elsewhere)
+        QShortcut(QKeySequence("Meta+Up"), self).activated.connect(self._increase_transparency)
+        QShortcut(QKeySequence("Meta+Down"), self).activated.connect(self._decrease_transparency)
 
         # Opacity effects
         self.chat_opacity_effect = None
@@ -632,6 +761,16 @@ class ChatWindow(QMainWindow):
             if self._normal_geometry:
                 self.setGeometry(self._normal_geometry)
             self.sidebar.focus_btn.setText("Focus Mode")
+
+    def _increase_transparency(self):
+        op = self.cfg.get_opacity()
+        self.cfg.set_opacity(max(0.1, op - 0.05))
+        self.apply_opacities()
+
+    def _decrease_transparency(self):
+        op = self.cfg.get_opacity()
+        self.cfg.set_opacity(min(1.0, op + 0.05))
+        self.apply_opacities()
 
     def _on_escape(self):
         if self.focus_mode:

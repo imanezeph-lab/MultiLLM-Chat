@@ -151,6 +151,7 @@ class ConfigManager:
             "title": "New Chat",
             "messages": [],
             "created_at": datetime.now().isoformat(),
+            "archived": False,
         }
         self.config["chats"].insert(0, chat)
         self.config["active_chat_id"] = chat_id
@@ -193,8 +194,50 @@ class ConfigManager:
                 self._mark_dirty()
                 break
 
-    def get_chat_list(self):
-        return [(c["id"], c["title"]) for c in self.config["chats"]]
+    def get_chat(self, chat_id):
+        for chat in self.config["chats"]:
+            if chat["id"] == chat_id:
+                return chat
+        return None
+
+    def archive_chat(self, chat_id):
+        for chat in self.config["chats"]:
+            if chat["id"] == chat_id:
+                chat["archived"] = True
+                if self.config["active_chat_id"] == chat_id:
+                    non_archived = [c for c in self.config["chats"] if not c.get("archived")]
+                    self.config["active_chat_id"] = (
+                        non_archived[0]["id"] if non_archived else None
+                    )
+                self._mark_dirty()
+                break
+
+    def unarchive_chat(self, chat_id):
+        for chat in self.config["chats"]:
+            if chat["id"] == chat_id:
+                chat["archived"] = False
+                self._mark_dirty()
+                break
+
+    def export_chat_text(self, chat_id):
+        chat = self.get_chat(chat_id)
+        if not chat:
+            return ""
+        lines = [f"{chat['title']}", "=" * len(chat['title']), ""]
+        for msg in chat["messages"]:
+            role = msg["role"].capitalize()
+            content = msg["content"]
+            if isinstance(content, list):
+                content = "[Image attached]"
+            lines.append(f"## {role}")
+            lines.append(content)
+            lines.append("")
+        return "\n".join(lines)
+
+    def get_chat_list(self, include_archived=False):
+        if include_archived:
+            return [(c["id"], c["title"]) for c in self.config["chats"]]
+        return [(c["id"], c["title"]) for c in self.config["chats"] if not c.get("archived")]
 
 
 # -- shared helpers --
